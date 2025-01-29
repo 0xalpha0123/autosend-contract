@@ -3,9 +3,12 @@ pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@chainlink/contracts/src/v0.8/automation/interfaces/KeeperCompatibleInterface.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 
-contract AutoSendAssets is KeeperCompatibleInterface {
+contract AutoSendAssets is KeeperCompatibleInterface, ReentrancyGuard, Ownable {
     address public platformWallet; // Wallet to receive the 0.5% fee
+    uint256 public FEE_PERCENTAGE = 5; // 0.5% fee
 
     enum State {
         Scheduled,
@@ -16,49 +19,51 @@ contract AutoSendAssets is KeeperCompatibleInterface {
     }
 
     struct Schedule {
+        address sender;      // Sender of the funds
         string description;  // Description of the schedule
         address asset;       // Asset to send
         address recipient;   // Recipient of the funds
         uint256 amount;      // Amount to send
-        uint256 interval;    // Timestamp to send
+        uint256 interval;    // Time interval for sending funds
         uint256 lastExecutedTime; // Last execution timestamp
         uint256 expiredTime;  // Expiration timestamp
-        State state;        // Current state of the schedule
+        State state;         // Current state of the schedule
     }
 
-    address[] public users; // List of users
-    mapping(address => bool) public isUser; // Tracks user existence
+    address[] private users; // List of users
+    mapping(address => Schedule[]) private schedules; // User schedules
 
-    mapping(address => Schedule[]) public schedules; // Tracks user schedules
+    event StateUpdated(address indexed user, address indexed recipient, string description, address asset, uint256 amount, uint256 interval, uint256 lastExecutedTime, uint256 expiredTime, State indexed state, uint256 blockTime);
 
-    event StateUpdated(string description, address asset, address recipient, uint256 amount, uint256 interval, uint256 lastExecutedTime, uint256 expiredTime, State state, uint256 time);
-
-    constructor(address _platformWallet) {
+    constructor(address _platformWallet) Ownable(msg.sender) {
+        require(_platformWallet != address(0), "Invalid platform wallet");
         platformWallet = _platformWallet;
     }
 
-    modifier isValid(
-        string memory description,
-        address asset,
-        address recipient,
-        uint256 amount,
-        uint256 interval,
-        uint256 expiredTime
-    ) {
-        require(bytes(description).length > 0, "Description cannot be empty");
-        require(amount > 0, "Amount must be greater than zero");
-        require(recipient != address(0), "Recipient address cannot be zero");
-        require(interval >= 1 days, "Interval is not correct");
-        require(expiredTime >= block.timestamp, "Expired time is not correct");
-
-        try IERC20(asset).totalSupply() returns (uint256) {
-            _;
-        } catch {
-            revert("Account must be ERC20 contract");
-        }
+    modifier onlyValidSchedule(address sender, uint256 index) {
+        require(index < schedules[sender].length, "Schedule does not exist");
+        require(schedules[sender][index].state != State.Expired, "Schedule is expired");
+        _;
     }
 
-    // Create a new schedule for autosend
+    // admin
+    function updatePlatformWallet(address _platformWallet) external onlyOwner {
+        require(_platformWallet != address(0), "Invalid platform wallet");
+        platformWallet = _platformWallet;
+    }
+
+    function updateFee(uint256 _newFee) external onlyOwner {
+        require(_newFee > 5, "Invalid fee");
+        FEE_PERCENTAGE = _newFee;
+    }
+
+    function isUser(address user) internal view returns (bool) {
+        for (uint256 i = 0; i < users.length; i++) {
+            if (users[i] == user) return true;
+        }
+        return false;
+    }
+
     function createSchedule(
         string memory description,
         address asset,
@@ -66,134 +71,91 @@ contract AutoSendAssets is KeeperCompatibleInterface {
         uint256 amount,
         uint256 interval,
         uint256 expiredTime
-    ) external isValid(description, asset, recipient, amount, interval, expiredTime) {
-        if (isUser[msg.sender] == false) {
-            users.push(msg.sender);
-            isUser[msg.sender] = true;
-        }
+    ) external {
+        require(bytes(description).length > 0, "Description cannot be empty");
+        require(asset != address(0), "Asset cannot be zero address");
+        require(recipient != address(0), "Recipient cannot be zero address");
+        require(amount > 0, "Amount must be greater than zero");
+        require(interval >= 1 days, "Interval must be at least one day");
+        require(expiredTime > block.timestamp, "Expiration must be in the future");
 
-        Schedule[] storage scheduleList = schedules[msg.sender];
-
-        scheduleList.push(Schedule({
+        schedules[msg.sender].push(Schedule({
+            sender: msg.sender,
             description: description,
             asset: asset,
             recipient: recipient,
             amount: amount,
             interval: interval,
+            lastExecutedTime: block.timestamp,
             expiredTime: expiredTime,
-            lastExecutedTime: 0,
             state: State.Scheduled
         }));
 
-        emit StateUpdated(description, asset, recipient, amount, interval, 0, expiredTime, State.Scheduled, block.timestamp);
+        if (!isUser(msg.sender)) {
+            users.push(msg.sender); // Track new user if not already present
+        }
+
+        emit StateUpdated(msg.sender, recipient, description, asset, amount, interval, block.timestamp, expiredTime, State.Scheduled, block.timestamp);
     }
 
-    // Modify an existing schedule
-    function updateSchedule(
-        uint256 index,
-        address newAsset,
-        uint256 newAmount,
-        uint256 interval
-    ) external {
-        Schedule[] storage scheduleList = schedules[msg.sender];
-        require(scheduleList[index].recipient != address(0), "Schedule does not exist");
-
-        scheduleList[index].asset = newAsset;
-        scheduleList[index].amount = newAmount;
-        scheduleList[index].interval = interval;
-        scheduleList[index].state = State.Updated;
-
-        emit StateUpdated(scheduleList[index].description, newAsset, scheduleList[index].recipient, newAmount, interval, scheduleList[index].lastExecutedTime, scheduleList[index].expiredTime, State.Updated, block.timestamp);
+    function cancelSchedule(uint256 index) external onlyValidSchedule(msg.sender, index) {
+        schedules[msg.sender][index].state = State.Canceled;
+        emit StateUpdated(msg.sender, schedules[msg.sender][index].recipient, schedules[msg.sender][index].description, schedules[msg.sender][index].asset, schedules[msg.sender][index].amount, schedules[msg.sender][index].interval, schedules[msg.sender][index].lastExecutedTime, schedules[msg.sender][index].expiredTime, State.Canceled, block.timestamp);
     }
 
-    // Cancel an existing schedule
-    function cancelSchedule(uint256 index) external {
-        Schedule[] storage scheduleList = schedules[msg.sender];
-        require(scheduleList[index].recipient != address(0), "Schedule does not exist");
-
-        scheduleList[index].state = State.Canceled;
-
-        emit StateUpdated(scheduleList[index].description, scheduleList[index].asset, scheduleList[index].recipient, scheduleList[index].amount, scheduleList[index].interval, scheduleList[index].lastExecutedTime, scheduleList[index].expiredTime, State.Canceled, block.timestamp);
-    }
-
-    // Chainlink Keeper: Check if any schedules need to be executed
-    function checkUpkeep(bytes calldata)
-        external
-        view
-        override
-        returns (bool upkeepNeeded, bytes memory performData)
-    {
-        upkeepNeeded = false;
-
-        // Loop through all user schedules to check if upkeep is needed
+    function checkUpkeep(bytes calldata) external view override returns (bool upkeepNeeded, bytes memory performData) {
         for (uint256 i = 0; i < users.length; i++) {
-            Schedule[] memory scheduleList = schedules[users[i]];
-            for (uint256 index = 0; index < scheduleList.length; index++) {
-                if (scheduleList[index].state != State.Canceled && block.timestamp >= scheduleList[index].lastExecutedTime + scheduleList[index].interval) {
+            Schedule[] memory userSchedules = schedules[users[i]];
+            for (uint256 j = 0; j < userSchedules.length; j++) {
+                if (userSchedules[j].state != State.Expired && userSchedules[j].state != State.Canceled && block.timestamp >= userSchedules[j].lastExecutedTime + userSchedules[j].interval) {
                     upkeepNeeded = true;
-                    performData = abi.encode(users[i], index); // Pass the user as performData
-                    break;
+                    performData = abi.encode(users[i], j); // Pass user and index for execution
+                    return (upkeepNeeded, performData);
                 }
             }
         }
     }
 
-    // Chainlink Keeper: Perform upkeep
-    function performUpkeep(bytes calldata performData) external override {
+    function performUpkeep(bytes calldata performData) external override nonReentrant {
         (address sender, uint256 index) = abi.decode(performData, (address, uint256));
-        Schedule[] storage scheduleList = schedules[sender];
-        Schedule storage schedule = scheduleList[index];
+        
+        require(sender != address(0), "Invalid sender");
 
-        require(
-            block.timestamp >= schedule.lastExecutedTime + schedule.interval,
-            "Too soon to execute"
-        );
-        require(
-            schedule.state != State.Canceled,
-            "Schedule is canceled"
-        );
+        executeSchedule(sender, index); // Call the internal function to execute the schedule
+    }
+
+    function executeSchedule(address sender, uint256 index) internal nonReentrant onlyValidSchedule(sender, index) {
+        Schedule storage schedule = schedules[sender][index];
+
+        require(block.timestamp >= schedule.lastExecutedTime + schedule.interval, "Too soon to execute");
+
+        require(schedule.state != State.Canceled, "Schedule was canceled");
+
+        require(schedule.state != State.Expired, "Schedule was expired");
 
         if (block.timestamp >= schedule.expiredTime) {
             schedule.state = State.Expired;
-
-            emit StateUpdated(schedule.description, schedule.asset, schedule.recipient, schedule.amount, schedule.interval, schedule.lastExecutedTime, schedule.expiredTime, State.Expired, block.timestamp);
+            emit StateUpdated(sender, schedule.recipient, schedule.description, schedule.asset, schedule.amount, schedule.interval, schedule.lastExecutedTime, schedule.expiredTime, State.Expired, block.timestamp);
+            return;
         }
 
-        uint256 totalAmount = schedule.amount;
-        uint256 fee = (totalAmount * 5) / 1000; // 0.5% fee
-
-        uint256 totalWithFees = totalAmount + fee;
+        uint256 fee = (schedule.amount * FEE_PERCENTAGE) / 1000; // Calculate fee
+        uint256 totalAmount = schedule.amount + fee;
 
         IERC20 asset = IERC20(schedule.asset);
+        
+        require(asset.balanceOf(sender) >= totalAmount, "Insufficient balance");
 
-        // Check if sender has sufficient balance
-        require(asset.balanceOf(sender) >= totalWithFees, "Insufficient balance");
+        // Transfer funds to recipient and fee to platform wallet in a single transaction.
+        asset.transferFrom(sender, schedule.recipient, schedule.amount);
+        asset.transferFrom(sender, platformWallet, fee);
 
-        // Transfer funds to recipient
-        require(
-            asset.transferFrom(sender, schedule.recipient, schedule.amount),
-            "Transfer to recipient failed"
-        );
-
-        // Transfer fee to platform wallet
-        require(
-            asset.transferFrom(sender, platformWallet, fee),
-            "Transfer of fee failed"
-        );
-
-        // Update last executed time
         schedule.lastExecutedTime = block.timestamp;
 
-        emit StateUpdated(schedule.description, schedule.asset, schedule.recipient, schedule.amount, schedule.interval, block.timestamp, schedule.expiredTime, State.Funded, block.timestamp);
+        emit StateUpdated(sender, schedule.recipient, schedule.description, schedule.asset, schedule.amount, schedule.interval, block.timestamp, schedule.expiredTime, State.Expired, block.timestamp);
     }
 
-    // View details of a user's schedule
-    function getSchedule(address user)
-        external
-        view
-        returns (Schedule[] memory)
-    {
-        Schedule[] memory scheduleList = schedules[user];
-        return scheduleList;
+    function getSchedules() external view returns (Schedule[] memory) {
+        return schedules[msg.sender];
     }
 }
