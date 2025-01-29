@@ -42,7 +42,8 @@ contract AutoSendAssets is KeeperCompatibleInterface, ReentrancyGuard, Ownable {
 
     modifier onlyValidSchedule(address sender, uint256 index) {
         require(index < schedules[sender].length, "Schedule does not exist");
-        require(schedules[sender][index].state != State.Expired, "Schedule is expired");
+        require(schedules[sender][index].state != State.Expired, "Schedule was expired");
+        require(schedules[sender][index].state != State.Canceled, "Schedule was canceled");
         _;
     }
 
@@ -90,6 +91,40 @@ contract AutoSendAssets is KeeperCompatibleInterface, ReentrancyGuard, Ownable {
             expiredTime: expiredTime,
             state: State.Scheduled
         }));
+
+        if (!isUser(msg.sender)) {
+            users.push(msg.sender); // Track new user if not already present
+        }
+
+        emit StateUpdated(msg.sender, recipient, description, asset, amount, interval, block.timestamp, expiredTime, State.Scheduled, block.timestamp);
+    }
+
+    function updateSchedule(
+        uint256 index,
+        string memory description,
+        address asset,
+        address recipient,
+        uint256 amount,
+        uint256 interval,
+        uint256 expiredTime
+    ) external onlyValidSchedule(msg.sender, index) {
+        require(bytes(description).length > 0, "Description cannot be empty");
+        require(asset != address(0), "Asset cannot be zero address");
+        require(recipient != address(0), "Recipient cannot be zero address");
+        require(amount > 0, "Amount must be greater than zero");
+        require(interval >= 1 days, "Interval must be at least one day");
+        require(expiredTime > block.timestamp, "Expiration must be in the future");
+
+        Schedule storage schedule = schedules[msg.sender][index];
+
+        schedule.description = description;
+        schedule.asset = asset;
+        schedule.recipient = recipient;
+        schedule.amount = amount;
+        schedule.interval = interval;
+        schedule.expiredTime = expiredTime;
+        schedule.state = State.Updated;
+        schedule.lastExecutedTime = block.timestamp;
 
         if (!isUser(msg.sender)) {
             users.push(msg.sender); // Track new user if not already present
