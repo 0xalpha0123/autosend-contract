@@ -130,7 +130,7 @@ contract AutoSendAssets is KeeperCompatibleInterface, ReentrancyGuard, Ownable {
             users.push(msg.sender); // Track new user if not already present
         }
 
-        emit StateUpdated(msg.sender, recipient, description, asset, amount, interval, block.timestamp, expiredTime, State.Scheduled, block.timestamp);
+        emit StateUpdated(msg.sender, recipient, description, asset, amount, interval, block.timestamp, expiredTime, State.Updated, block.timestamp);
     }
 
     function cancelSchedule(uint256 index) external onlyValidSchedule(msg.sender, index) {
