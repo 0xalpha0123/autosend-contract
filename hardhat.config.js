@@ -1,14 +1,14 @@
 require("@nomicfoundation/hardhat-toolbox");
-require('@nomiclabs/hardhat-ethers'); // For ethers.js integration
-require('@nomiclabs/hardhat-waffle'); // For Waffle testing framework
-require('hardhat-deploy'); // For deployment automation
-require('@nomiclabs/hardhat-etherscan'); // For Etherscan verification
+require("@nomicfoundation/hardhat-verify");
+require("@nomicfoundation/hardhat-ethers");
+require("@nomicfoundation/hardhat-network-helpers");
+require("hardhat-gas-reporter");
 require('dotenv').config(); // To manage environment variables
 
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
   solidity: {
-    version: "0.8.0", // Solidity compiler version
+    version: "0.8.20", // Solidity compiler version
     settings: {
       optimizer: {
         enabled: true, // Enable optimization for gas usage
@@ -24,14 +24,18 @@ module.exports = {
     },
     localhost: {
       url: process.env.LOCALHOST_URL, // Localhost URL
-      accounts: [process.env.PRIVATE_KEY], // Local deployer's private key
+      accounts: [process.env.PRIVATE_KEY_LOCALHOST], // Local deployer's private key
     },
-    mainnet: {
-      url: process.env.MAINNET_URL, // Mainnet URL
+    base_mainnet: {
+      url: process.env.BASE_MAINNET_URL, // Mainnet URL
       accounts: [process.env.PRIVATE_KEY], // Mainnet deployer's private key
     },
-    ropsten: {
-      url: process.env.ROPSTEN_URL, // Ropsten network URL
+    base_sepoila: {
+      url: process.env.BASE_SEPOILA_URL, // Ropsten network URL
+      accounts: [process.env.PRIVATE_KEY], // Deployer's private key for Ropsten
+    },
+    eth_sepoila: {
+      url: process.env.ETH_SEPOILA_URL, // Ropsten network URL
       accounts: [process.env.PRIVATE_KEY], // Deployer's private key for Ropsten
     },
   },
@@ -53,9 +57,12 @@ module.exports = {
     timeout: 20000, // Timeout for tests (in milliseconds)
   },
   gasReporter: {
-    enabled: process.env.REPORT_GAS ? true : false, // Enables gas reporting for test runs
+    enabled: true, // Enables gas reporting for test runs
+    // enabled: process.env.REPORT_GAS ? true : false, // Enables gas reporting for test runs
     currency: 'USD', // Reporting gas costs in USD
     gasPrice: 20, // Default gas price to be used
     outputFile: 'gas-report.txt', // Output file for gas report
+    L2: "base",
+    L2Etherscan: process.env.ETHERSCAN_API_KEY,
   },
 };

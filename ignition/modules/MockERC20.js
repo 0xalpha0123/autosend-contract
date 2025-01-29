@@ -3,9 +3,9 @@
 
 const { buildModule } = require("@nomicfoundation/hardhat-ignition/modules");
 
-module.exports = buildModule("MockUSDCModule", (m) => {
+module.exports = buildModule("MockERC20Module", (m) => {
 
-  const mockUSDC = m.contract("MockUSDCModule");
+  const mockERC20 = m.contract("MockERC20");
 
-  return { mockUSDC };
+  return { mockERC20 };
 });

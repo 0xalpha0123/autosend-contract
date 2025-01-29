@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@chainlink/contracts/src/v0.8/automation/interfaces/KeeperCompatibleInterface.sol";
+import "@chainlink/contracts/src/v0.8/automation/interfaces/AutomationCompatibleInterface.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
-contract AutoSendAssets is KeeperCompatibleInterface, ReentrancyGuard, Ownable {
+contract AutoSendAssets is AutomationCompatibleInterface, ReentrancyGuard, Ownable {
     address public platformWallet; // Wallet to receive the 0.5% fee
     uint256 public FEE_PERCENTAGE = 5; // 0.5% fee
 
@@ -33,11 +33,28 @@ contract AutoSendAssets is KeeperCompatibleInterface, ReentrancyGuard, Ownable {
     address[] private users; // List of users
     mapping(address => Schedule[]) private schedules; // User schedules
 
+    event Received(address sender, uint amount);
+
     event StateUpdated(address indexed user, address indexed recipient, string description, address asset, uint256 amount, uint256 interval, uint256 lastExecutedTime, uint256 expiredTime, State indexed state, uint256 blockTime);
 
     constructor(address _platformWallet) Ownable(msg.sender) {
         require(_platformWallet != address(0), "Invalid platform wallet");
         platformWallet = _platformWallet;
+    }
+
+    // Function to receive Ether (without calldata)
+    receive() external payable {
+        emit Received(msg.sender, msg.value);
+    }
+
+    // Fallback function (used when calldata is sent but no matching function exists)
+    fallback() external payable {
+        emit Received(msg.sender, msg.value);
+    }
+
+    // Get contract balance
+    function getBalance() external view returns (uint) {
+        return address(this).balance;
     }
 
     modifier onlyValidSchedule(address sender, uint256 index) {
@@ -47,17 +64,18 @@ contract AutoSendAssets is KeeperCompatibleInterface, ReentrancyGuard, Ownable {
         _;
     }
 
-    // admin
+    // Admin
     function updatePlatformWallet(address _platformWallet) external onlyOwner {
         require(_platformWallet != address(0), "Invalid platform wallet");
         platformWallet = _platformWallet;
     }
 
     function updateFee(uint256 _newFee) external onlyOwner {
-        require(_newFee > 5, "Invalid fee");
+        require(_newFee >= 5, "Invalid fee");
         FEE_PERCENTAGE = _newFee;
     }
 
+    // Protocol
     function isUser(address user) internal view returns (bool) {
         for (uint256 i = 0; i < users.length; i++) {
             if (users[i] == user) return true;
@@ -97,6 +115,8 @@ contract AutoSendAssets is KeeperCompatibleInterface, ReentrancyGuard, Ownable {
         }
 
         emit StateUpdated(msg.sender, recipient, description, asset, amount, interval, block.timestamp, expiredTime, State.Scheduled, block.timestamp);
+
+        require(handlePayment(msg.sender, schedules[msg.sender].length - 1), "Payment process was failed");
     }
 
     function updateSchedule(
@@ -124,7 +144,6 @@ contract AutoSendAssets is KeeperCompatibleInterface, ReentrancyGuard, Ownable {
         schedule.interval = interval;
         schedule.expiredTime = expiredTime;
         schedule.state = State.Updated;
-        schedule.lastExecutedTime = block.timestamp;
 
         if (!isUser(msg.sender)) {
             users.push(msg.sender); // Track new user if not already present
@@ -153,20 +172,16 @@ contract AutoSendAssets is KeeperCompatibleInterface, ReentrancyGuard, Ownable {
 
     function performUpkeep(bytes calldata performData) external override nonReentrant {
         (address sender, uint256 index) = abi.decode(performData, (address, uint256));
-        
+
         require(sender != address(0), "Invalid sender");
 
         executeSchedule(sender, index); // Call the internal function to execute the schedule
     }
 
-    function executeSchedule(address sender, uint256 index) internal nonReentrant onlyValidSchedule(sender, index) {
+    function executeSchedule(address sender, uint256 index) internal onlyValidSchedule(sender, index) {
         Schedule storage schedule = schedules[sender][index];
 
         require(block.timestamp >= schedule.lastExecutedTime + schedule.interval, "Too soon to execute");
-
-        require(schedule.state != State.Canceled, "Schedule was canceled");
-
-        require(schedule.state != State.Expired, "Schedule was expired");
 
         if (block.timestamp >= schedule.expiredTime) {
             schedule.state = State.Expired;
@@ -174,23 +189,35 @@ contract AutoSendAssets is KeeperCompatibleInterface, ReentrancyGuard, Ownable {
             return;
         }
 
+        require(handlePayment(sender, index), "Payment process was failed");
+    }
+
+    function handlePayment(address sender, uint256 index) internal returns(bool) {
+        Schedule storage schedule = schedules[sender][index];
+
         uint256 fee = (schedule.amount * FEE_PERCENTAGE) / 1000; // Calculate fee
         uint256 totalAmount = schedule.amount + fee;
 
         IERC20 asset = IERC20(schedule.asset);
-        
+
         require(asset.balanceOf(sender) >= totalAmount, "Insufficient balance");
 
         // Transfer funds to recipient and fee to platform wallet in a single transaction.
         asset.transferFrom(sender, schedule.recipient, schedule.amount);
         asset.transferFrom(sender, platformWallet, fee);
 
+        emit StateUpdated(sender, schedule.recipient, schedule.description, schedule.asset, schedule.amount, schedule.interval, block.timestamp, schedule.expiredTime, State.Funded, block.timestamp);
+
         schedule.lastExecutedTime = block.timestamp;
 
-        emit StateUpdated(sender, schedule.recipient, schedule.description, schedule.asset, schedule.amount, schedule.interval, block.timestamp, schedule.expiredTime, State.Expired, block.timestamp);
+        return true;
     }
 
     function getSchedules() external view returns (Schedule[] memory) {
         return schedules[msg.sender];
+    }
+
+    function getUsers() external view onlyOwner returns (address[] memory) {
+        return users;
     }
 }
