@@ -3,12 +3,13 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@chainlink/contracts/src/v0.8/automation/interfaces/AutomationCompatibleInterface.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 
-contract AutoSendAssets is AutomationCompatibleInterface, ReentrancyGuard, Ownable {
+contract AutoSendAssets is Initializable, ReentrancyGuardUpgradeable, OwnableUpgradeable, AutomationCompatibleInterface {
     address public platformWallet; // Wallet to receive the 0.5% fee
-    uint256 public FEE_PERCENTAGE = 5; // 0.5% fee
+    uint256 public FEE_PERCENTAGE; // 0.5% fee
 
     enum State {
         Scheduled,
@@ -37,9 +38,10 @@ contract AutoSendAssets is AutomationCompatibleInterface, ReentrancyGuard, Ownab
 
     event StateUpdated(address indexed user, address indexed recipient, string description, address asset, uint256 amount, uint256 interval, uint256 lastExecutedTime, uint256 expiredTime, State indexed state, uint256 blockTime);
 
-    constructor(address _platformWallet) Ownable(msg.sender) {
-        require(_platformWallet != address(0), "Invalid platform wallet");
-        platformWallet = _platformWallet;
+    function initialize() public initializer {
+        __ReentrancyGuard_init();
+        __Ownable_init();
+        FEE_PERCENTAGE = 50;
     }
 
     // Function to receive Ether (without calldata)
@@ -71,7 +73,7 @@ contract AutoSendAssets is AutomationCompatibleInterface, ReentrancyGuard, Ownab
     }
 
     function updateFee(uint256 _newFee) external onlyOwner {
-        require(_newFee >= 5, "Invalid fee");
+        require(_newFee >= 10, "Invalid fee");
         FEE_PERCENTAGE = _newFee;
     }
 
@@ -163,19 +165,22 @@ contract AutoSendAssets is AutomationCompatibleInterface, ReentrancyGuard, Ownab
             for (uint256 j = 0; j < userSchedules.length; j++) {
                 if (userSchedules[j].state != State.Expired && userSchedules[j].state != State.Canceled && block.timestamp >= userSchedules[j].lastExecutedTime + userSchedules[j].interval) {
                     upkeepNeeded = true;
-                    performData = abi.encode(users[i], j); // Pass user and index for execution
-                    return (upkeepNeeded, performData);
                 }
             }
         }
+
+        return (upkeepNeeded, performData);
     }
 
     function performUpkeep(bytes calldata performData) external override nonReentrant {
-        (address sender, uint256 index) = abi.decode(performData, (address, uint256));
-
-        require(sender != address(0), "Invalid sender");
-
-        executeSchedule(sender, index); // Call the internal function to execute the schedule
+        for (uint256 i = 0; i < users.length; i++) {
+            Schedule[] memory userSchedules = schedules[users[i]];
+            for (uint256 j = 0; j < userSchedules.length; j++) {
+                if (userSchedules[j].state != State.Expired && userSchedules[j].state != State.Canceled && block.timestamp >= userSchedules[j].lastExecutedTime + userSchedules[j].interval) {
+                    executeSchedule(users[i], j); // Call the internal function to execute the schedule
+                }
+            }
+        }
     }
 
     function executeSchedule(address sender, uint256 index) internal onlyValidSchedule(sender, index) {
@@ -195,7 +200,7 @@ contract AutoSendAssets is AutomationCompatibleInterface, ReentrancyGuard, Ownab
     function handlePayment(address sender, uint256 index) internal returns(bool) {
         Schedule storage schedule = schedules[sender][index];
 
-        uint256 fee = (schedule.amount * FEE_PERCENTAGE) / 1000; // Calculate fee
+        uint256 fee = (schedule.amount * FEE_PERCENTAGE) / 10000; // Calculate fee
         uint256 totalAmount = schedule.amount + fee;
 
         IERC20 asset = IERC20(schedule.asset);
